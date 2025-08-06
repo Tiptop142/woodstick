@@ -1,25 +1,27 @@
+
+import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command
 
 TOKEN = "8265074513:AAECiHCO5pUSlzOs8KEZWYUU94h06ve25ic"
 
 AUTHORIZED_USERS = [635809430]  # Твій ID
 
 bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
 # Клавіатура меню "Майстерня"
 menu_buttons = [
-    KeyboardButton("🛠 Повідомити про поломку"),
-    KeyboardButton("📊 Список активних поломок"),
-    KeyboardButton("📈 Статистика за день"),
-    KeyboardButton("❌ Вийти з меню"),
+    KeyboardButton(text="🛠 Повідомити про поломку"),
+    KeyboardButton(text="📊 Список активних поломок"),
+    KeyboardButton(text="📈 Статистика за день"),
+    KeyboardButton(text="❌ Вийти з меню"),
 ]
-menu_keyboard = ReplyKeyboardMarkup(resize_keyboard=True).add(*menu_buttons)
+menu_keyboard = ReplyKeyboardMarkup(keyboard=[[menu_buttons[0], menu_buttons[1]], [menu_buttons[2], menu_buttons[3]]], resize_keyboard=True)
 
 
-@dp.message_handler(commands=['start'])
+@dp.message(Command('start'))
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
     if user_id in AUTHORIZED_USERS:
@@ -28,7 +30,7 @@ async def start_handler(message: types.Message):
         await message.answer("⛔️ У вас немає доступу до цього бота.")
 
 
-@dp.message_handler()
+@dp.message()
 async def menu_handler(message: types.Message):
     user_id = message.from_user.id
     if user_id not in AUTHORIZED_USERS:
@@ -49,5 +51,9 @@ async def menu_handler(message: types.Message):
         await message.answer("Будь ласка, оберіть пункт меню.")
 
 
+async def main():
+    await dp.start_polling(bot)
+
+
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
