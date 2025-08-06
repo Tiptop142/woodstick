@@ -1,59 +1,45 @@
-
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.filters import StateFilter
 
 TOKEN = "8265074513:AAECiHCO5pUSlzOs8KEZWYUU94h06ve25ic"
-
-AUTHORIZED_USERS = [635809430]  # Твій ID
-
 bot = Bot(token=TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
-# Клавіатура меню "Майстерня"
-menu_buttons = [
-    KeyboardButton(text="🛠 Повідомити про поломку"),
-    KeyboardButton(text="📊 Список активних поломок"),
-    KeyboardButton(text="📈 Статистика за день"),
-    KeyboardButton(text="❌ Вийти з меню"),
-]
-menu_keyboard = ReplyKeyboardMarkup(keyboard=[[menu_buttons[0], menu_buttons[1]], [menu_buttons[2], menu_buttons[3]]], resize_keyboard=True)
+class ReportStates(StatesGroup):
+    waiting_for_photo = State()
+    waiting_for_comment = State()
 
+@dp.message(CommandStart())
+async def start(message: types.Message, state: FSMContext):
+    print(f"/start від користувача {message.from_user.id}")
+    await message.answer("Надішліть фото несправності:")
+    await state.set_state(ReportStates.waiting_for_photo)
 
-@dp.message(Command('start'))
-async def start_handler(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in AUTHORIZED_USERS:
-        await message.answer("Ласкаво просимо до меню «Майстерня»", reply_markup=menu_keyboard)
-    else:
-        await message.answer("⛔️ У вас немає доступу до цього бота.")
+@dp.message(F.photo, StateFilter(ReportStates.waiting_for_photo))
+async def photo_handler(message: types.Message, state: FSMContext):
+    print(f"Отримано фото від {message.from_user.id}")
+    file_id = message.photo[-1].file_id
+    await state.update_data(photo=file_id)
+    await message.answer("Фото отримано! Тепер надішліть коментар.")
+    await state.set_state(ReportStates.waiting_for_comment)
 
-
-@dp.message()
-async def menu_handler(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in AUTHORIZED_USERS:
-        await message.answer("⛔️ У вас немає доступу до цього бота.")
-        return
-
-    text = message.text
-
-    if text == "🛠 Повідомити про поломку":
-        await message.answer("Виберіть тип поломки (поки не реалізовано)")
-    elif text == "📊 Список активних поломок":
-        await message.answer("Список активних поломок (поки не реалізовано)")
-    elif text == "📈 Статистика за день":
-        await message.answer("Статистика за день (поки не реалізовано)")
-    elif text == "❌ Вийти з меню":
-        await message.answer("Вихід з меню. Щоб знову побачити меню, надішліть /start", reply_markup=types.ReplyKeyboardRemove())
-    else:
-        await message.answer("Будь ласка, оберіть пункт меню.")
-
+@dp.message(StateFilter(ReportStates.waiting_for_comment))
+async def comment_handler(message: types.Message, state: FSMContext):
+    print(f"Отримано коментар від {message.from_user.id}: {message.text}")
+    data = await state.get_data()
+    photo_id = data.get("photo")
+    comment = message.text
+    await message.answer(f"Отримано коментар: {comment}\nФото file_id: {photo_id}")
+    await state.clear()
 
 async def main():
+    print("Бот запускається...")
     await dp.start_polling(bot)
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
