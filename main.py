@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import aiosqlite
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode, ContentType
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
@@ -17,6 +18,8 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+DB_PATH = "malfunctions.db"
+
 class ReportState(StatesGroup):
     choosing_mech_option = State()
     work_area = State()
@@ -28,8 +31,80 @@ class ReportState(StatesGroup):
     photo = State()
     adding_comment = State()
 
-active_reports = {}  # {message_id: {..., comments: [], original_data: {...}}}
 last_menu_message_id = None
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS reports (
+            message_id INTEGER PRIMARY KEY,
+            work_area TEXT,
+            malfunction_type TEXT,
+            machine TEXT,
+            equipment TEXT,
+            description TEXT,
+            critical INTEGER,
+            status TEXT DEFAULT 'Активна'
+        )
+        """)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER,
+            comment TEXT,
+            FOREIGN KEY(message_id) REFERENCES reports(message_id)
+        )
+        """)
+        await db.commit()
+
+async def save_report(message_id, data):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            INSERT OR REPLACE INTO reports
+            (message_id, work_area, malfunction_type, machine, equipment, description, critical, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            message_id,
+            data.get('work_area', ''),
+            data.get('malfunction_type', ''),
+            data.get('machine', ''),
+            data.get('equipment', ''),
+            data.get('description', ''),
+            int(data.get('critical', False)),
+            'Активна'
+        ))
+        await db.commit()
+
+async def get_report_by_message_id(message_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT work_area, malfunction_type, machine, equipment, description, critical, status FROM reports WHERE message_id = ?", (message_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        work_area, malfunction_type, machine, equipment, description, critical, status = row
+        cursor = await db.execute("SELECT comment FROM comments WHERE message_id = ?", (message_id,))
+        comments_rows = await cursor.fetchall()
+        comments = [c[0] for c in comments_rows]
+        return {
+            "work_area": work_area,
+            "malfunction_type": malfunction_type,
+            "machine": machine,
+            "equipment": equipment,
+            "description": description,
+            "critical": bool(critical),
+            "status": status,
+            "comments": comments
+        }
+
+async def update_report_status(message_id, new_status):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE reports SET status = ? WHERE message_id = ?", (new_status, message_id))
+        await db.commit()
+
+async def add_comment_to_report(message_id, comment_text):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO comments (message_id, comment) VALUES (?, ?)", (message_id, comment_text))
+        await db.commit()
 
 async def delete_old_messages(state: FSMContext, chat_id: int):
     data = await state.get_data()
@@ -196,8 +271,10 @@ async def description_entered(message: Message, state: FSMContext):
     await save_message_id(state, sent_msg)
     await state.set_state(ReportState.photo)
 
-@dp.message(ReportState.photo, F.content_type.in_({ContentType.PHOTO, ContentType.DOCUMENT}))
-async def photo_or_doc_received(message: Message, state: FSMContext):
+from aiogram.enums import ContentType  # У тебе він вже імпортований, просто для ясності
+
+@dp.message(ReportState.photo, F.content_type.in_({ContentType.PHOTO, ContentType.DOCUMENT, ContentType.VIDEO}))
+async def media_received(message: Message, state: FSMContext):
     data = await state.get_data()
     malfunction_type_dict = {
         "mechanical": "Механічна",
@@ -239,23 +316,31 @@ async def photo_or_doc_received(message: Message, state: FSMContext):
                 parse_mode=ParseMode.HTML,
                 reply_markup=None
             )
+        elif message.video:
+            file_id = message.video.file_id
+            sent = await bot.send_video(
+                chat_id=GROUP_ID,
+                video=file_id,
+                caption=caption_base,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None
+            )
         else:
-            await message.answer("❗ Будь ласка, надішліть фото або документ.")
+            await message.answer("❗ Будь ласка, надішліть фото, відео або документ.")
             return
 
-        # Зберігаємо оригінальні дані для подальших оновлень
-        active_reports[sent.message_id] = {
+        # Зберігаємо у базу
+        db_data = {
             "work_area": data.get('work_area', ''),
             "malfunction_type": malfunction_type_text,
             "machine": data.get('machine', ''),
             "equipment": data.get('equipment', ''),
             "description": data.get('description', ''),
-            "critical": critical_flag,
-            "status": "Активна",
-            "comments": []
+            "critical": critical_flag
         }
+        await save_report(sent.message_id, db_data)
 
-        # Формуємо кнопки з "Відремонтовано" і "Коментар"
+        # Кнопки "Відремонтовано" та "Коментар"
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="Відремонтовано", callback_data=f"mark_done:{sent.message_id}"),
@@ -281,6 +366,7 @@ async def photo_or_doc_received(message: Message, state: FSMContext):
 
     await state.clear()
     await send_menu_button()
+
 
 @dp.message(ReportState.photo)
 async def invalid_input(message: Message):
@@ -318,15 +404,15 @@ async def mark_done_handler(callback: CallbackQuery):
     except ValueError:
         await callback.answer("Невірні дані.")
         return
-    report = active_reports.get(message_id)
+    report = await get_report_by_message_id(message_id)
     if not report:
         await callback.answer("Цей звіт вже відмічений або не існує.")
         return
     if report["status"] == "Відремонтовано":
         await callback.answer("Цей звіт уже відмічений як відремонтований.")
         return
-    report["status"] = "Відремонтовано"
-    active_reports[message_id] = report
+    await update_report_status(message_id, "Відремонтовано")
+    report = await get_report_by_message_id(message_id)  # оновлюємо
     try:
         await bot.edit_message_caption(
             chat_id=GROUP_ID,
@@ -348,7 +434,8 @@ async def add_comment_handler(callback: CallbackQuery, state: FSMContext):
     except ValueError:
         await callback.answer("Невірні дані.")
         return
-    if message_id not in active_reports:
+    report = await get_report_by_message_id(message_id)
+    if not report:
         await callback.answer("Звіт не знайдено.")
         return
     await state.update_data(comment_message_id=message_id)
@@ -360,7 +447,7 @@ async def add_comment_receive(message: Message, state: FSMContext):
     data = await state.get_data()
     message_id = data.get("comment_message_id")
 
-    if not message_id or message_id not in active_reports:
+    if not message_id:
         await message.answer("Не вдалося знайти поломку для додавання коментаря.")
         await state.clear()
         return
@@ -370,8 +457,8 @@ async def add_comment_receive(message: Message, state: FSMContext):
         await message.answer("Коментар не може бути порожнім. Напишіть, будь ласка, текст коментаря.")
         return
 
-    active_reports[message_id]["comments"].append(comment_text)
-    report = active_reports[message_id]
+    await add_comment_to_report(message_id, comment_text)
+    report = await get_report_by_message_id(message_id)
 
     show_buttons = (report.get('status') != "Відремонтовано")
 
@@ -434,6 +521,8 @@ async def back_to_malfunction_type(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 async def main():
+    logger.info("Ініціалізація бази даних...")
+    await init_db()
     logger.info("Бот запускається...")
     await send_menu_button()
     await dp.start_polling(bot)
